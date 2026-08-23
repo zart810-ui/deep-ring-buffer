@@ -1,83 +1,467 @@
-⚡ Ultimate Enterprise Concurrency Benchmark Suite: Comprehensive Technical Guide & Documentation
-1. Project Overview & Architecture Philosophy
-The Ultimate Enterprise Concurrency Benchmark Suite is a production-grade, highly optimized C++ microbenchmark and auditing framework. It is engineered to evaluate, compare, and stress-test high-performance lock-free synchronization primitives—specifically focusing on Single-Producer Single-Consumer (SPSC) and Multi-Producer Multi-Consumer (MPMC) bounded ring buffers.
+⚡ Ultimate Enterprise Concurrency Benchmark Suite
+Comprehensive Technical Documentation
+1. Project Overview
 
-Traditional concurrency benchmarks often suffer from noise caused by scheduler interruptions, false sharing, improper thread affinity mapping, and weak validation criteria. This framework addresses those challenges by incorporating low-level CPU instructions (_mm_pause), cross-platform core pinning with Windows Processor Group support, explicit warm-up phases, and complete mathematical/logical auditing of every single transferred payload.
+The Ultimate Enterprise Concurrency Benchmark Suite is a high-performance C++ microbenchmark and concurrency validation framework designed to evaluate lock-free bounded ring buffers under realistic multi-threaded workloads.
 
-2. Core Data Structures & Algorithms
-A. Optimized SPSC Ring Buffer (Phase 1)
-Design Principle: Designed strictly for 1-to-1 thread handoffs, eliminating atomic compare-and-swap (CAS) contention entirely.
+The framework focuses on two synchronization models:
 
-Memory Ordering: Leverages std::memory_order_relaxed for local index lookups and std::memory_order_acquire/release barriers to synchronize payload visibility between the producer and consumer threads.
+SPSC — Single-Producer / Single-Consumer
+MPMC — Multi-Producer / Multi-Consumer
 
-Layout: Uses cache-line padding (alignas(CACHE_LINE)) to prevent false sharing between the independent head_ and tail_ atomic pointers.
+The benchmark is designed not only to measure raw throughput, but also to verify data integrity under heavy concurrent contention.
 
-B. Dmitry Vyukov Bounded MPMC Ring Buffer (Phase 2)
-Algorithm Basis: Implements Dmitry Vyukov’s celebrated lock-free bounded MPMC queue architecture.
+To improve benchmark consistency and reduce measurement noise, the framework incorporates:
 
-Cell Sequencing: Each ring buffer cell contains a sequence number combined with the data payload.
+CPU spin-wait instructions (_mm_pause)
+Explicit thread affinity
+Windows Processor Group support
+Cache-line alignment
+Acquire/release memory ordering
+Warm-up runs
+Start synchronization
+Multiple benchmark iterations
+Full payload integrity verification
+2. Architecture
 
-A cell is ready for enqueue when its sequence equals the cell's target position (dif == 0).
+The benchmark consists of three major components:
 
-A cell is ready for dequeue when its sequence equals the target position plus one (dif == 0 for pos + 1).
+                 Ultimate Concurrency Benchmark
+                              │
+             ┌────────────────┼────────────────┐
+             │                │                │
+             ▼                ▼                ▼
+        SPSC Queue       MPMC Queue       Integrity Audit
+             │                │                │
+          1P / 1C        1P / 1C           3P / 3C
+                           2P / 2C
+                           3P / 3C
+Execution Pipeline
+Part 1
+ ├── SPSC 1P/1C
+ └── MPMC 1P/1C
 
-CAS Loop: Threads contend via compare_exchange_weak on shared atomic position indices (enqueue_pos_ and dequeue_pos_), ensuring lock-free progress guarantees (obstruction-free/lock-free).
+Part 2
+ ├── MPMC 2P/2C
+ └── MPMC 3P/3C
 
-3. Advanced Engineering & Low-Level Optimizations
-Adaptive CPU Backoff (cpu_pause):
-Instead of aggressive spinning or immediate scheduler yielding (std::this_thread::yield()), the framework injects _mm_pause() (x86/x64) or equivalent instructions to hint the CPU core that it is in a spin-wait loop. This significantly reduces power consumption, avoids pipeline flushes, and optimizes memory bus utilization.
+Part 3
+ └── Strict Integrity Test
+      └── 3 Producers / 3 Consumers
 
-Robust Cross-Platform Thread Affinity (pin_thread_to_core):
+Each performance benchmark processes:
 
-Linux: Implements pthread_setaffinity_np with custom cpu_set_t bitmasks.
+10,000,000 items × 5 iterations
 
-Windows: Implements SetThreadGroupAffinity combined with dynamic Processor Group discovery (GetActiveProcessorGroupCount / GetActiveProcessorCount), safely handling modern high-core-count multi-group systems (64+ logical processors) with fallback masks and bounds validation (subgroupCore %= 64).
+3. SPSC Ring Buffer
 
-Strict Synchronization Barriers (StartBarrier):
-Prevents thread creation and OS scheduling jitter from skewing benchmark timers. All worker threads spin on an atomic flag until barrier.start() triggers a synchronized, simultaneous release.
+The SPSC implementation is specialized for exactly one producer and one consumer.
 
-4. Comprehensive Benchmark Suite Structure
-The framework executes a three-part validation and performance evaluation pipeline:
+Because only one thread modifies each index, the queue does not require CAS operations for normal enqueue/dequeue operations.
 
-[ Main Execution Pipeline ]
- ├── Part 1: Single-Node Queue Overhead (SPSC 1P/1C & MPMC 1P/1C)
- ├── Part 2: Multi-Threaded Scaling Test (MPMC 2P/2C & 3P/3C)
- └── Part 3: Strict Data Integrity & Audit Verification (3P/3C, 10M Items)
-Part 1 & Part 2: Throughput Performance & Statistical Analysis
-Workload: Processes 10,000,000 items (TOTAL_ITEMS) per iteration across 5 independent runs (ITERATIONS).
+Design
+Producer
+   │
+   ▼
+tail ───────► [ Ring Buffer ]
+                 │
+                 ▼
+              head
+                 │
+                 ▼
+             Consumer
 
-Metrics Tracked: Calculates and outputs Min, Avg, Median, and Max throughput in operations per second (ops/sec).
+The implementation uses:
 
-Isolation: SPSC and MPMC configurations are evaluated under identical memory models and core pinning rules.
+std::atomic<size_t>
+memory_order_relaxed
+memory_order_acquire
+memory_order_release
+Power-of-two buffer sizing
+Cache-line alignment
 
-Part 3: Strict Data Integrity Audit (run_integrity_check)
-Objective: Guarantees absolute correctness under heavy contention (3 Producers / 3 Consumers).
+The index calculation uses:
 
-Payload Uniqueness: Each producer injects globally unique values derived from its thread ID and sequence offset (p * items_per_producer + i + 1).
+index & (Size - 1)
 
-Comprehensive Post-Processing Audit:
+instead of the more expensive modulo operation.
 
-Loss Detection: Verifies that total consumed items equal TOTAL_ITEMS.
+With:
 
-Range Verification: Ensures no corrupted or out-of-bounds values exist (1 <= value <= TOTAL_ITEMS).
+BUFFER_SIZE = 131072
 
-Duplication & Missing Value Check: Utilizes a dense std::vector<bool> seen lookup array to confirm that every single integer from 1 to 10,000,000 was processed exactly once.
+the buffer size is a power of two, allowing efficient index wrapping.
 
-5. Build & Execution Instructions
-Prerequisites
-A modern C++ compiler supporting C++11 or higher (GCC, Clang, MSVC).
+4. MPMC Ring Buffer
 
-Multi-threading library support.
+The MPMC implementation is based on the bounded sequence-number ring-buffer algorithm commonly associated with Dmitry Vyukov.
 
-Compilation Commands
-Linux (GCC / Clang):
+Unlike the SPSC queue, multiple producers and consumers can concurrently access the queue.
 
-Bash
+Each cell contains:
+
+struct Cell
+{
+    std::atomic<size_t> sequence;
+    T data;
+};
+
+The sequence number determines whether a cell is available for enqueue or dequeue.
+
+Enqueue
+
+A producer checks whether:
+
+sequence == enqueue_position
+
+If the condition is satisfied, the producer attempts to claim the position using:
+
+compare_exchange_weak()
+
+After writing the payload, the producer publishes the cell using:
+
+memory_order_release
+Dequeue
+
+A consumer checks whether:
+
+sequence == dequeue_position + 1
+
+After retrieving the payload, the consumer advances the cell sequence to make the slot available for future producers.
+
+5. Memory Ordering
+
+The benchmark deliberately avoids unnecessarily strong sequential consistency.
+
+The primary synchronization model is:
+
+relaxed
+   ↓
+acquire / release
+   ↓
+payload visibility
+
+For example, a producer writes the payload first:
+
+buffer_[tail] = item;
+
+and then publishes the new position:
+
+tail_.store(
+    next,
+    std::memory_order_release
+);
+
+The consumer obtains the corresponding position using:
+
+tail_.load(
+    std::memory_order_acquire
+);
+
+This establishes the required visibility relationship between the payload and queue metadata.
+
+6. Cache-Line Optimization
+
+The queue uses:
+
+alignas(CACHE_LINE)
+
+with:
+
+constexpr size_t CACHE_LINE = 64;
+
+The objective is to reduce false sharing between frequently modified atomic variables.
+
+For example:
+
+Cache Line A
+┌──────────────────────────────┐
+│ enqueue_pos_                 │
+└──────────────────────────────┘
+
+Cache Line B
+┌──────────────────────────────┐
+│ dequeue_pos_                 │
+└──────────────────────────────┘
+
+Separating these frequently modified variables can reduce unnecessary cache-coherence traffic.
+
+7. CPU Spin-Wait Optimization
+
+The benchmark uses a dedicated CPU pause function:
+
+inline void cpu_pause() noexcept
+
+On supported x86/x64 MSVC builds it uses:
+
+_mm_pause();
+
+and GCC/Clang-compatible x86 builds use:
+
+__builtin_ia32_pause();
+
+This is used while waiting for queue availability:
+
+while (!queue->push(1))
+{
+    cpu_pause();
+}
+
+and:
+
+while (!queue->pop(item))
+{
+    cpu_pause();
+}
+
+This is preferable to immediately performing an operating-system context switch during short spin-wait periods.
+
+8. Thread Affinity
+
+The benchmark supports explicit CPU affinity.
+
+Linux
+
+Uses:
+
+pthread_setaffinity_np()
+
+with:
+
+cpu_set_t
+Windows
+
+Uses:
+
+SetThreadGroupAffinity()
+
+with Processor Group discovery through:
+
+GetActiveProcessorGroupCount()
+GetActiveProcessorCount()
+
+This allows the benchmark to explicitly assign worker threads to logical CPUs.
+
+For example:
+
+CPU 0 → Producer 0
+CPU 1 → Producer 1
+CPU 2 → Consumer 0
+CPU 3 → Consumer 1
+
+The benchmark also contains a fallback to SetThreadAffinityMask() where applicable.
+
+9. Start Synchronization
+
+The benchmark uses a lightweight custom start barrier.
+
+Workers first enter:
+
+barrier.wait();
+
+and remain in a spin-wait state until:
+
+barrier.start();
+
+is called.
+
+This allows the benchmark timer to begin immediately before the workers are released.
+
+Conceptually:
+
+Producer ─────┐
+              │
+Consumer ─────┼──► WAIT
+              │
+Consumer ─────┘
+
+                 │
+                 ▼
+          barrier.start()
+
+                 │
+                 ▼
+
+        ┌─────────────────┐
+        │ Benchmark START │
+        └─────────────────┘
+10. Benchmark Statistics
+
+Each performance configuration executes:
+
+ITERATIONS = 5
+TOTAL_ITEMS = 10,000,000
+
+Throughput is calculated as:
+
+throughput = total_items / elapsed_time
+
+The benchmark reports:
+
+Minimum
+Average
+Median
+Maximum
+
+Example:
+
+[SPSC 1P/1C]
+  Min:    X ops/sec
+  Avg:    X ops/sec
+  Median: X ops/sec
+  Max:    X ops/sec
+
+Using multiple iterations makes it possible to observe run-to-run variability instead of relying on a single measurement.
+
+11. Warm-Up Phase
+
+Before collecting performance measurements, each benchmark configuration performs a complete warm-up run.
+
+The warm-up is intentionally excluded from the reported statistics.
+
+This helps reduce the influence of initial execution effects such as:
+
+Thread startup
+Initial cache state
+Memory allocation
+CPU frequency transitions
+Runtime initialization
+12. Strict Integrity Verification
+
+Performance alone is not sufficient for a concurrency benchmark.
+
+The framework therefore includes a dedicated integrity test.
+
+Configuration:
+
+3 Producers
+3 Consumers
+10,000,000 Items
+
+Each producer generates a globally unique integer:
+
+p * items_per_producer + i + 1
+
+This produces the expected range:
+
+1 ... 10,000,000
+
+The consumer side stores every received value.
+
+The final audit checks:
+
+1. Count
+Consumed == Produced
+2. Range
+
+Every value must satisfy:
+
+1 <= value <= TOTAL_ITEMS
+3. Duplicate Detection
+
+Every value is checked against:
+
+std::vector<bool> seen
+4. Missing Value Detection
+
+Every expected value must appear exactly once.
+
+Therefore, a successful test establishes:
+
+No loss
+No duplication
+No invalid values
+No missing values
+
+with respect to the test's verification criteria.
+
+13. Benchmark Configuration
+
+Current configuration:
+
+CACHE_LINE  = 64
+BUFFER_SIZE = 131072
+ITERATIONS  = 5
+TOTAL_ITEMS = 10000000
+
+The benchmark evaluates:
+
+Test	Producers	Consumers	Items
+SPSC	1	1	10,000,000
+MPMC	1	1	10,000,000
+MPMC	2	2	10,000,000
+MPMC	3	3	10,000,000
+Integrity	3	3	10,000,000
+14. Build Requirements
+
+The project requires a modern C++ compiler with C++11-or-newer threading and atomic support.
+
+Linux — GCC
 g++ -O3 -pthread main.cpp -o concurrency_benchmark
-Windows (MSVC - Developer Command Prompt):
+Linux — Clang
+clang++ -O3 -pthread main.cpp -o concurrency_benchmark
+Windows — MSVC
 
-DOS
+From the Developer Command Prompt for Visual Studio:
+
 cl /O2 /EHsc main.cpp /Fe:concurrency_benchmark.exe
-Execution
-Bash
+15. Execution
+
+Linux:
+
 ./concurrency_benchmark
+
+Windows:
+
+concurrency_benchmark.exe
+
+The program automatically detects the number of logical CPUs using:
+
+std::thread::hardware_concurrency()
+
+and reports the detected CPU count before beginning the benchmark.
+
+16. Design Goals
+
+The benchmark is designed around four primary goals:
+
+⚡ Performance
+
+Measure high-throughput lock-free queue operations under different levels of contention.
+
+🧵 Scalability
+
+Compare single-threaded ownership against multiple producers and consumers.
+
+🛡️ Correctness
+
+Verify that concurrency optimizations do not result in lost, duplicated, corrupted, or missing data.
+
+🔬 Reproducibility
+
+Reduce benchmark noise through warm-up, CPU affinity, synchronization, cache-aware layout, and repeated measurements.
+
+17. Final Summary
+
+The Ultimate Enterprise Concurrency Benchmark Suite combines low-level C++ atomic programming, cache-aware data structures, CPU affinity, spin-wait optimization, statistical benchmarking, and exhaustive integrity verification into a single test framework.
+
+Its architecture separates the two major concerns of concurrent queue evaluation:
+
+              ┌───────────────────────┐
+              │   Performance         │
+              │   Benchmarking        │
+              └───────────┬───────────┘
+                          │
+                          ▼
+                 Throughput Analysis
+                          │
+                          │
+              ┌───────────▼───────────┐
+              │   Correctness         │
+              │   Verification        │
+              └───────────┬───────────┘
+                          │
+                          ▼
+                 Full Data Audit
+
+The result is a high-throughput, contention-focused concurrency benchmark that measures both how fast the queue operates and whether it maintains correctness under heavy concurrent workloads.
