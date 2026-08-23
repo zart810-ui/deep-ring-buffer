@@ -1,4 +1,83 @@
-⚡ Ultimate Enterprise Concurrency Benchmark SuiteAn enterprise-grade C++ microbenchmark framework designed for measuring performance and verifying data integrity of high-performance, lock-free data structures.📌 Key FeaturesDual Ring Buffer Architecture:SPSC Ring Buffer: Ultra-low latency, lock-free ring buffer optimized for Single-Producer / Single-Consumer (1P/1C) environments.Bounded MPMC Ring Buffer: Multi-Producer / Multi-Consumer ring buffer implementing Dmitry Vyukov's bounded algorithm.Robust Synchronization & Low-Level Optimization:Precise memory ordering utilizing std::memory_order_acquire and std::memory_order_release.Low-level CPU pausing via cpu_pause() (_mm_pause / __builtin_ia32_pause) to prevent scheduler yield overhead and pipeline stalls.Cache-line alignment (alignas(CACHE_LINE)) to mitigate false sharing.Advanced Cross-Platform Thread Affinity:Full support for Linux (pthread_setaffinity_np) and Windows (SetThreadGroupAffinity / SetThreadAffinityMask).Built-in support for Windows systems with 64+ logical processors via Processor Groups.Rigorous Integrity & Audit Checks:Comprehensive auditing (Part 3) that verifies every single item from $1$ to $\text{TOTAL\_ITEMS}$ is processed exactly once, detecting any loss, duplication, or out-of-range values.Statistical Rigor:Explicit warm-up phases and 5-iteration execution reporting Min, Avg, Median, and Max throughput statistics.🛠️ Build & Run Instructions1. PrerequisitesC++11 compatible compiler (GCC, Clang, MSVC)Multi-threading support (-pthread flag for GCC/Clang)2. CompilationLinux (GCC / Clang):Bashg++ -O3 -pthread main.cpp -o benchmark
-Windows (MSVC):DOScl /O2 /EHsc main.cpp /Fe:benchmark.exe
-3. ExecutionBash./benchmark
-📊 Benchmark Suite StructurePart 1: Single-Node Queue Overhead ComparisonSPSC (1P/1C) performance baseline measurement.MPMC (1P/1C) performance measurement.Part 2: MPMC Multi-Threaded Scaling TestMulti-threaded scaling verification under MPMC (2P/2C) and (3P/3C) configurations.Part 3: Data Integrity VerificationStrict audit test injecting 10,000,000 unique items under a 3P/3C topology to guarantee absolute correctness without data corruption.
+⚡ Ultimate Enterprise Concurrency Benchmark Suite: Comprehensive Technical Guide & Documentation
+1. Project Overview & Architecture Philosophy
+The Ultimate Enterprise Concurrency Benchmark Suite is a production-grade, highly optimized C++ microbenchmark and auditing framework. It is engineered to evaluate, compare, and stress-test high-performance lock-free synchronization primitives—specifically focusing on Single-Producer Single-Consumer (SPSC) and Multi-Producer Multi-Consumer (MPMC) bounded ring buffers.
+
+Traditional concurrency benchmarks often suffer from noise caused by scheduler interruptions, false sharing, improper thread affinity mapping, and weak validation criteria. This framework addresses those challenges by incorporating low-level CPU instructions (_mm_pause), cross-platform core pinning with Windows Processor Group support, explicit warm-up phases, and complete mathematical/logical auditing of every single transferred payload.
+
+2. Core Data Structures & Algorithms
+A. Optimized SPSC Ring Buffer (Phase 1)
+Design Principle: Designed strictly for 1-to-1 thread handoffs, eliminating atomic compare-and-swap (CAS) contention entirely.
+
+Memory Ordering: Leverages std::memory_order_relaxed for local index lookups and std::memory_order_acquire/release barriers to synchronize payload visibility between the producer and consumer threads.
+
+Layout: Uses cache-line padding (alignas(CACHE_LINE)) to prevent false sharing between the independent head_ and tail_ atomic pointers.
+
+B. Dmitry Vyukov Bounded MPMC Ring Buffer (Phase 2)
+Algorithm Basis: Implements Dmitry Vyukov’s celebrated lock-free bounded MPMC queue architecture.
+
+Cell Sequencing: Each ring buffer cell contains a sequence number combined with the data payload.
+
+A cell is ready for enqueue when its sequence equals the cell's target position (dif == 0).
+
+A cell is ready for dequeue when its sequence equals the target position plus one (dif == 0 for pos + 1).
+
+CAS Loop: Threads contend via compare_exchange_weak on shared atomic position indices (enqueue_pos_ and dequeue_pos_), ensuring lock-free progress guarantees (obstruction-free/lock-free).
+
+3. Advanced Engineering & Low-Level Optimizations
+Adaptive CPU Backoff (cpu_pause):
+Instead of aggressive spinning or immediate scheduler yielding (std::this_thread::yield()), the framework injects _mm_pause() (x86/x64) or equivalent instructions to hint the CPU core that it is in a spin-wait loop. This significantly reduces power consumption, avoids pipeline flushes, and optimizes memory bus utilization.
+
+Robust Cross-Platform Thread Affinity (pin_thread_to_core):
+
+Linux: Implements pthread_setaffinity_np with custom cpu_set_t bitmasks.
+
+Windows: Implements SetThreadGroupAffinity combined with dynamic Processor Group discovery (GetActiveProcessorGroupCount / GetActiveProcessorCount), safely handling modern high-core-count multi-group systems (64+ logical processors) with fallback masks and bounds validation (subgroupCore %= 64).
+
+Strict Synchronization Barriers (StartBarrier):
+Prevents thread creation and OS scheduling jitter from skewing benchmark timers. All worker threads spin on an atomic flag until barrier.start() triggers a synchronized, simultaneous release.
+
+4. Comprehensive Benchmark Suite Structure
+The framework executes a three-part validation and performance evaluation pipeline:
+
+[ Main Execution Pipeline ]
+ ├── Part 1: Single-Node Queue Overhead (SPSC 1P/1C & MPMC 1P/1C)
+ ├── Part 2: Multi-Threaded Scaling Test (MPMC 2P/2C & 3P/3C)
+ └── Part 3: Strict Data Integrity & Audit Verification (3P/3C, 10M Items)
+Part 1 & Part 2: Throughput Performance & Statistical Analysis
+Workload: Processes 10,000,000 items (TOTAL_ITEMS) per iteration across 5 independent runs (ITERATIONS).
+
+Metrics Tracked: Calculates and outputs Min, Avg, Median, and Max throughput in operations per second (ops/sec).
+
+Isolation: SPSC and MPMC configurations are evaluated under identical memory models and core pinning rules.
+
+Part 3: Strict Data Integrity Audit (run_integrity_check)
+Objective: Guarantees absolute correctness under heavy contention (3 Producers / 3 Consumers).
+
+Payload Uniqueness: Each producer injects globally unique values derived from its thread ID and sequence offset (p * items_per_producer + i + 1).
+
+Comprehensive Post-Processing Audit:
+
+Loss Detection: Verifies that total consumed items equal TOTAL_ITEMS.
+
+Range Verification: Ensures no corrupted or out-of-bounds values exist (1 <= value <= TOTAL_ITEMS).
+
+Duplication & Missing Value Check: Utilizes a dense std::vector<bool> seen lookup array to confirm that every single integer from 1 to 10,000,000 was processed exactly once.
+
+5. Build & Execution Instructions
+Prerequisites
+A modern C++ compiler supporting C++11 or higher (GCC, Clang, MSVC).
+
+Multi-threading library support.
+
+Compilation Commands
+Linux (GCC / Clang):
+
+Bash
+g++ -O3 -pthread main.cpp -o concurrency_benchmark
+Windows (MSVC - Developer Command Prompt):
+
+DOS
+cl /O2 /EHsc main.cpp /Fe:concurrency_benchmark.exe
+Execution
+Bash
+./concurrency_benchmark
