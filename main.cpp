@@ -3,80 +3,132 @@
 #include <thread>
 #include <vector>
 #include <chrono>
+#include <cstdint>
 
-// Ultra-fast MPMC-ready style Lock-Free Ring Buffer (Busy-waiting Version)
+// True Bounded MPMC Queue (Dmitry Vyukov Algorithm)
 template <typename T, size_t Size>
-class LockFreeRingBuffer {
-private:
-    alignas(64) std::atomic<size_t> head_{0};
-    alignas(64) std::atomic<size_t> tail_{0};
-    T buffer_[Size];
+class MPMCRingBuffer {
+    // Size must be a power of two for fast bitwise masking
+    static_assert((Size & (Size - 1)) == 0, "Size must be a power of two");
+
+    struct Cell {
+        std::atomic<size_t> sequence;
+        T data;
+    };
+
+    alignas(64) std::atomic<size_t> enqueue_pos_{0};
+    alignas(64) std::atomic<size_t> dequeue_pos_{0};
+    Cell buffer_[Size];
 
 public:
-    bool push(const T& item) {
-        size_t current_tail = tail_.load(std::memory_order_relaxed);
-        size_t next_tail = (current_tail + 1) % Size;
-        
-        if (next_tail == head_.load(std::memory_order_acquire)) {
-            return false; 
+    MPMCRingBuffer() {
+        for (size_t i = 0; i < Size; ++i) {
+            buffer_[i].sequence.store(i, std::memory_order_relaxed);
         }
-        
-        buffer_[current_tail] = item;
-        tail_.store(next_tail, std::memory_order_release);
-        return true;
+    }
+
+    bool push(const T& item) {
+        size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
+        for (;;) {
+            Cell& cell = buffer_[pos & (Size - 1)];
+            size_t seq = cell.sequence.load(std::memory_order_acquire);
+            intptr_t dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
+
+            if (dif == 0) {
+                if (enqueue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                    cell.data = item;
+                    cell.sequence.store(pos + 1, std::memory_order_release);
+                    return true;
+                }
+            } else if (dif < 0) {
+                return false; // Buffer is full
+            } else {
+                pos = enqueue_pos_.load(std::memory_order_relaxed);
+            }
+        }
     }
 
     bool pop(T& item) {
-        size_t current_head = head_.load(std::memory_order_relaxed);
-        
-        if (current_head == tail_.load(std::memory_order_acquire)) {
-            return false; 
+        size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
+        for (;;) {
+            Cell& cell = buffer_[pos & (Size - 1)];
+            size_t seq = cell.sequence.load(std::memory_order_acquire);
+            intptr_t dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
+
+            if (dif == 0) {
+                if (dequeue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                    item = cell.data;
+                    cell.sequence.store(pos + Size, std::memory_order_release);
+                    return true;
+                }
+            } else if (dif < 0) {
+                return false; // Buffer is empty
+            } else {
+                pos = dequeue_pos_.load(std::memory_order_relaxed);
+            }
         }
-        
-        item = buffer_[current_head];
-        head_.store((current_head + 1) % Size, std::memory_order_release);
-        return true;
     }
 };
 
 int main() {
-    std::cout << "[⚡] Deep-Ring Extreme Spin-Lock Benchmark Started...\n";
-    
-    LockFreeRingBuffer<int, 100000> ring_buffer;
-    const int TOTAL_ITEMS = 10000000; 
-    
+    constexpr size_t BUFFER_SIZE = 131072; // Must be power of 2
+    constexpr int PRODUCERS = 4;
+    constexpr int CONSUMERS = 4;
+    constexpr int ITEMS_PER_PRODUCER = 2500000;
+    constexpr long long TOTAL_ITEMS = static_cast<long long>(PRODUCERS) * ITEMS_PER_PRODUCER;
+
+    std::cout << "[⚡] True MPMC Benchmark Started (4P / 4C)...\n";
+    std::cout << "Target Total Items: " << TOTAL_ITEMS << "\n";
+
+    MPMCRingBuffer<int, BUFFER_SIZE> queue;
+
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // Producer: No yield, pure busy-waiting for max throughput
-    std::thread producer([&]() {
-        for (int i = 0; i < TOTAL_ITEMS; ++i) {
-            while (!ring_buffer.push(i)) {
-                // Busy-waiting: spin continuously without yielding
-            }
-        }
-    });
+    std::vector<std::thread> producers;
+    std::vector<std::thread> consumers;
+    producers.reserve(PRODUCERS);
+    consumers.reserve(CONSUMERS);
 
-    // Consumer: No yield, pure busy-waiting
-    std::thread consumer([&]() {
-        int item;
-        for (int i = 0; i < TOTAL_ITEMS; ++i) {
-            while (!ring_buffer.pop(item)) {
-                // Busy-waiting
-            }
-        }
-    });
+    std::atomic<long long> consumed_count{0};
 
-    producer.join();
-    consumer.join();
+    // Spawn Producer Threads
+    for (int p = 0; p < PRODUCERS; ++p) {
+        producers.emplace_back([&queue]() {
+            for (int i = 0; i < ITEMS_PER_PRODUCER; ++i) {
+                while (!queue.push(i)) {
+                    // Spin-lock backpressure
+                }
+            }
+        });
+    }
+
+    // Spawn Consumer Threads
+    for (int c = 0; c < CONSUMERS; ++c) {
+        consumers.emplace_back([&queue, &consumed_count]() {
+            int item;
+            for (;;) {
+                long long current = consumed_count.load(std::memory_order_relaxed);
+                if (current >= TOTAL_ITEMS) break;
+
+                if (queue.pop(item)) {
+                    consumed_count.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+
+    // Wait for all threads to finish
+    for (auto& t : producers) t.join();
+    for (auto& t : consumers) t.join();
 
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end_time - start_time;
 
-    double tps = TOTAL_ITEMS / elapsed.count();
+    double tps = static_cast<double>(TOTAL_ITEMS) / elapsed.count();
 
-    std::cout << "[✔] 10,000,000 Items Processed (Spin-Lock)!\n";
+    std::cout << "[✔] 10,000,000 Items Processed (True MPMC)!\n";
     std::cout << "⏱️ Elapsed Time: " << elapsed.count() << " seconds\n";
-    std::cout << "🚀 TPS: " << (long long)tps << " ops/sec\n";
+    std::cout << "🚀 TPS: " << static_cast<long long>(tps) << " ops/sec\n";
 
     return 0;
 }
